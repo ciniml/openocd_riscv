@@ -58,9 +58,7 @@ DIST_SUBDIRS += %D%/libjaylink
 endif
 endif
 
-if BITBANG
 DRIVERFILES += %D%/bitbang.c
-endif
 if PARPORT
 DRIVERFILES += %D%/parport.c
 endif
@@ -159,9 +157,7 @@ endif
 if XLNX_PCIE_XVC
 DRIVERFILES += %D%/xlnx-pcie-xvc.c
 endif
-if BCM2835GPIO
 DRIVERFILES += %D%/bcm2835gpio.c
-endif
 if OPENJTAG
 DRIVERFILES += %D%/openjtag.c
 endif

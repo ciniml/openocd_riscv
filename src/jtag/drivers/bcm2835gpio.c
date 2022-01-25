@@ -29,24 +29,6 @@
 
 #include <sys/mman.h>
 
-uint32_t bcm2835_peri_base = 0x20000000;
-#define BCM2835_GPIO_BASE	(bcm2835_peri_base + 0x200000) /* GPIO controller */
-
-#define BCM2835_PADS_GPIO_0_27		(bcm2835_peri_base + 0x100000)
-#define BCM2835_PADS_GPIO_0_27_OFFSET	(0x2c / 4)
-
-/* GPIO setup macros */
-#define MODE_GPIO(g) (*(pio_base+((g)/10))>>(((g)%10)*3) & 7)
-#define INP_GPIO(g) do { *(pio_base+((g)/10)) &= ~(7<<(((g)%10)*3)); } while (0)
-#define SET_MODE_GPIO(g, m) do { /* clear the mode bits first, then set as necessary */ \
-		INP_GPIO(g);						\
-		*(pio_base+((g)/10)) |=  ((m)<<(((g)%10)*3)); } while (0)
-#define OUT_GPIO(g) SET_MODE_GPIO(g, 1)
-
-#define GPIO_SET (*(pio_base+7))  /* sets   bits which are 1, ignores bits which are 0 */
-#define GPIO_CLR (*(pio_base+10)) /* clears bits which are 1, ignores bits which are 0 */
-#define GPIO_LEV (*(pio_base+13)) /* current level of the pin */
-
 static int dev_mem_fd;
 static volatile uint32_t *pio_base;
 
@@ -69,43 +51,46 @@ static struct bitbang_interface bcm2835gpio_bitbang = {
 	.blink = NULL
 };
 
-/* GPIO numbers for each signal. Negative values are invalid */
-static int tck_gpio = -1;
-static int tck_gpio_mode;
-static int tms_gpio = -1;
-static int tms_gpio_mode;
-static int tdi_gpio = -1;
-static int tdi_gpio_mode;
-static int tdo_gpio = -1;
-static int tdo_gpio_mode;
-static int trst_gpio = -1;
-static int trst_gpio_mode;
-static int srst_gpio = -1;
-static int srst_gpio_mode;
-static int swclk_gpio = -1;
-static int swclk_gpio_mode;
-static int swdio_gpio = -1;
-static int swdio_gpio_mode;
-static int swdio_dir_gpio = -1;
-static int swdio_dir_gpio_mode;
+// /* GPIO numbers for each signal. Negative values are invalid */
+// static int tck_gpio = -1;
+// static int tck_gpio_mode;
+// static int tms_gpio = -1;
+// static int tms_gpio_mode;
+// static int tdi_gpio = -1;
+// static int tdi_gpio_mode;
+// static int tdo_gpio = -1;
+// static int tdo_gpio_mode;
+// static int trst_gpio = -1;
+// static int trst_gpio_mode;
+// static int srst_gpio = -1;
+// static int srst_gpio_mode;
+// static int swclk_gpio = -1;
+// static int swclk_gpio_mode;
+// static int swdio_gpio = -1;
+// static int swdio_gpio_mode;
+// static int swdio_dir_gpio = -1;
+// static int swdio_dir_gpio_mode;
 
 /* Transition delay coefficients */
 static int speed_coeff = 113714;
 static int speed_offset = 28;
 static unsigned int jtag_delay;
 
+static uint32_t gpio_read_raw(void) { return *pio_base; }
+static void gpio_write_raw(uint32_t v) { *pio_base = v; }
+static void gpio_set_tri(uint32_t v, uint32_t m) { *(pio_base + 1) = (*(pio_base + 1) & ~m) | (v & m); }
+//static uint32_t gpio2_read_raw(void) { return *(pio_base + 2); }
+static void gpio2_write_raw(uint32_t v) { *(pio_base + 2) = v; }
+static void gpio2_set_tri(uint32_t v, uint32_t m) { *(pio_base + 3) = (*(pio_base + 3) & ~m) | (v & m); }
+
 static bb_value_t bcm2835gpio_read(void)
 {
-	return (GPIO_LEV & 1<<tdo_gpio) ? BB_HIGH : BB_LOW;
+	return (gpio_read_raw() & (1u << 3)) ? BB_HIGH : BB_LOW;
 }
 
 static int bcm2835gpio_write(int tck, int tms, int tdi)
 {
-	uint32_t set = tck<<tck_gpio | tms<<tms_gpio | tdi<<tdi_gpio;
-	uint32_t clear = !tck<<tck_gpio | !tms<<tms_gpio | !tdi<<tdi_gpio;
-
-	GPIO_SET = set;
-	GPIO_CLR = clear;
+	gpio_write_raw((tck << 2) | (tms << 1) | (tdi << 0));
 
 	for (unsigned int i = 0; i < jtag_delay; i++)
 		asm volatile ("");
@@ -115,12 +100,6 @@ static int bcm2835gpio_write(int tck, int tms, int tdi)
 
 static int bcm2835gpio_swd_write(int swclk, int swdio)
 {
-	uint32_t set = swclk << swclk_gpio | swdio << swdio_gpio;
-	uint32_t clear = !swclk << swclk_gpio | !swdio << swdio_gpio;
-
-	GPIO_SET = set;
-	GPIO_CLR = clear;
-
 	for (unsigned int i = 0; i < jtag_delay; i++)
 		asm volatile ("");
 
@@ -130,46 +109,19 @@ static int bcm2835gpio_swd_write(int swclk, int swdio)
 /* (1) assert or (0) deassert reset lines */
 static int bcm2835gpio_reset(int trst, int srst)
 {
-	uint32_t set = 0;
-	uint32_t clear = 0;
-
-	if (trst_gpio > 0) {
-		set |= !trst<<trst_gpio;
-		clear |= trst<<trst_gpio;
-	}
-
-	if (srst_gpio > 0) {
-		set |= !srst<<srst_gpio;
-		clear |= srst<<srst_gpio;
-	}
-
-	GPIO_SET = set;
-	GPIO_CLR = clear;
+	gpio2_set_tri(0, 1);
+	gpio2_write_raw(trst || srst);
 
 	return ERROR_OK;
 }
 
 static void bcm2835_swdio_drive(bool is_output)
 {
-	if (swdio_dir_gpio > 0) {
-		if (is_output) {
-			GPIO_SET = 1 << swdio_dir_gpio;
-			OUT_GPIO(swdio_gpio);
-		} else {
-			INP_GPIO(swdio_gpio);
-			GPIO_CLR = 1 << swdio_dir_gpio;
-		}
-	} else {
-		if (is_output)
-			OUT_GPIO(swdio_gpio);
-		else
-			INP_GPIO(swdio_gpio);
-	}
 }
 
 static int bcm2835_swdio_read(void)
 {
-	return !!(GPIO_LEV & 1 << swdio_gpio);
+	return 0;
 }
 
 static int bcm2835gpio_khz(int khz, int *jtag_speed)
@@ -196,123 +148,58 @@ static int bcm2835gpio_speed(int speed)
 	return ERROR_OK;
 }
 
-static int is_gpio_valid(int gpio)
-{
-	return gpio >= 0 && gpio <= 53;
-}
-
 COMMAND_HANDLER(bcm2835gpio_handle_jtag_gpionums)
 {
-	if (CMD_ARGC == 4) {
-		COMMAND_PARSE_NUMBER(int, CMD_ARGV[0], tck_gpio);
-		COMMAND_PARSE_NUMBER(int, CMD_ARGV[1], tms_gpio);
-		COMMAND_PARSE_NUMBER(int, CMD_ARGV[2], tdi_gpio);
-		COMMAND_PARSE_NUMBER(int, CMD_ARGV[3], tdo_gpio);
-	} else if (CMD_ARGC != 0) {
-		return ERROR_COMMAND_SYNTAX_ERROR;
-	}
-
-	command_print(CMD,
-			"BCM2835 GPIO config: tck = %d, tms = %d, tdi = %d, tdo = %d",
-			tck_gpio, tms_gpio, tdi_gpio, tdo_gpio);
-
 	return ERROR_OK;
 }
 
 COMMAND_HANDLER(bcm2835gpio_handle_jtag_gpionum_tck)
 {
-	if (CMD_ARGC == 1)
-		COMMAND_PARSE_NUMBER(int, CMD_ARGV[0], tck_gpio);
-
-	command_print(CMD, "BCM2835 GPIO config: tck = %d", tck_gpio);
 	return ERROR_OK;
 }
 
 COMMAND_HANDLER(bcm2835gpio_handle_jtag_gpionum_tms)
 {
-	if (CMD_ARGC == 1)
-		COMMAND_PARSE_NUMBER(int, CMD_ARGV[0], tms_gpio);
-
-	command_print(CMD, "BCM2835 GPIO config: tms = %d", tms_gpio);
 	return ERROR_OK;
 }
 
 COMMAND_HANDLER(bcm2835gpio_handle_jtag_gpionum_tdo)
 {
-	if (CMD_ARGC == 1)
-		COMMAND_PARSE_NUMBER(int, CMD_ARGV[0], tdo_gpio);
-
-	command_print(CMD, "BCM2835 GPIO config: tdo = %d", tdo_gpio);
 	return ERROR_OK;
 }
 
 COMMAND_HANDLER(bcm2835gpio_handle_jtag_gpionum_tdi)
 {
-	if (CMD_ARGC == 1)
-		COMMAND_PARSE_NUMBER(int, CMD_ARGV[0], tdi_gpio);
-
-	command_print(CMD, "BCM2835 GPIO config: tdi = %d", tdi_gpio);
 	return ERROR_OK;
 }
 
 COMMAND_HANDLER(bcm2835gpio_handle_jtag_gpionum_srst)
 {
-	if (CMD_ARGC == 1)
-		COMMAND_PARSE_NUMBER(int, CMD_ARGV[0], srst_gpio);
-
-	command_print(CMD, "BCM2835 GPIO config: srst = %d", srst_gpio);
 	return ERROR_OK;
 }
 
 COMMAND_HANDLER(bcm2835gpio_handle_jtag_gpionum_trst)
 {
-	if (CMD_ARGC == 1)
-		COMMAND_PARSE_NUMBER(int, CMD_ARGV[0], trst_gpio);
-
-	command_print(CMD, "BCM2835 GPIO config: trst = %d", trst_gpio);
 	return ERROR_OK;
 }
 
 COMMAND_HANDLER(bcm2835gpio_handle_swd_gpionums)
 {
-	if (CMD_ARGC == 2) {
-		COMMAND_PARSE_NUMBER(int, CMD_ARGV[0], swclk_gpio);
-		COMMAND_PARSE_NUMBER(int, CMD_ARGV[1], swdio_gpio);
-	} else if (CMD_ARGC != 0) {
-		return ERROR_COMMAND_SYNTAX_ERROR;
-	}
-
-	command_print(CMD,
-			"BCM2835 GPIO nums: swclk = %d, swdio = %d",
-			swclk_gpio, swdio_gpio);
-
 	return ERROR_OK;
 }
 
 COMMAND_HANDLER(bcm2835gpio_handle_swd_gpionum_swclk)
 {
-	if (CMD_ARGC == 1)
-		COMMAND_PARSE_NUMBER(int, CMD_ARGV[0], swclk_gpio);
-
-	command_print(CMD, "BCM2835 num: swclk = %d", swclk_gpio);
 	return ERROR_OK;
 }
 
 COMMAND_HANDLER(bcm2835gpio_handle_swd_gpionum_swdio)
 {
-	if (CMD_ARGC == 1)
-		COMMAND_PARSE_NUMBER(int, CMD_ARGV[0], swdio_gpio);
-
-	command_print(CMD, "BCM2835 num: swdio = %d", swdio_gpio);
 	return ERROR_OK;
 }
 
 COMMAND_HANDLER(bcm2835gpio_handle_swd_dir_gpionum_swdio)
 {
-	if (CMD_ARGC == 1)
-		COMMAND_PARSE_NUMBER(int, CMD_ARGV[0], swdio_dir_gpio);
-
-	command_print(CMD, "BCM2835 num: swdio_dir = %d", swdio_dir_gpio);
 	return ERROR_OK;
 }
 
@@ -330,11 +217,6 @@ COMMAND_HANDLER(bcm2835gpio_handle_speed_coeffs)
 
 COMMAND_HANDLER(bcm2835gpio_handle_peripheral_base)
 {
-	if (CMD_ARGC == 1)
-		COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], bcm2835_peri_base);
-
-	command_print(CMD, "BCM2835 GPIO: peripheral_base = 0x%08x",
-				  bcm2835_peri_base);
 	return ERROR_OK;
 }
 
@@ -470,31 +352,19 @@ struct adapter_driver bcm2835gpio_adapter_driver = {
 
 static bool bcm2835gpio_jtag_mode_possible(void)
 {
-	if (!is_gpio_valid(tck_gpio))
-		return 0;
-	if (!is_gpio_valid(tms_gpio))
-		return 0;
-	if (!is_gpio_valid(tdi_gpio))
-		return 0;
-	if (!is_gpio_valid(tdo_gpio))
-		return 0;
 	return 1;
 }
 
 static bool bcm2835gpio_swd_mode_possible(void)
 {
-	if (!is_gpio_valid(swclk_gpio))
-		return 0;
-	if (!is_gpio_valid(swdio_gpio))
-		return 0;
-	return 1;
+	return 0;
 }
 
 static int bcm2835gpio_init(void)
 {
 	bitbang_interface = &bcm2835gpio_bitbang;
 
-	LOG_INFO("BCM2835 GPIO JTAG/SWD bitbang driver");
+	LOG_INFO("XDMA GPIO JTAG/SWD bitbang driver");
 
 	if (transport_is_jtag() && !bcm2835gpio_jtag_mode_possible()) {
 		LOG_ERROR("Require tck, tms, tdi and tdo gpios for JTAG mode");
@@ -506,18 +376,14 @@ static int bcm2835gpio_init(void)
 		return ERROR_JTAG_INIT_FAILED;
 	}
 
-	dev_mem_fd = open("/dev/gpiomem", O_RDWR | O_SYNC);
-	if (dev_mem_fd < 0) {
-		LOG_DEBUG("Cannot open /dev/gpiomem, fallback to /dev/mem");
-		dev_mem_fd = open("/dev/mem", O_RDWR | O_SYNC);
-	}
+	dev_mem_fd = open("/dev/xdma0_user", O_RDWR | O_SYNC);
 	if (dev_mem_fd < 0) {
 		LOG_ERROR("open: %s", strerror(errno));
 		return ERROR_JTAG_INIT_FAILED;
 	}
-
+	
 	pio_base = mmap(NULL, sysconf(_SC_PAGE_SIZE), PROT_READ | PROT_WRITE,
-				MAP_SHARED, dev_mem_fd, BCM2835_GPIO_BASE);
+				MAP_SHARED, dev_mem_fd, 0);
 
 	if (pio_base == MAP_FAILED) {
 		LOG_ERROR("mmap: %s", strerror(errno));
@@ -525,95 +391,66 @@ static int bcm2835gpio_init(void)
 		return ERROR_JTAG_INIT_FAILED;
 	}
 
-	static volatile uint32_t *pads_base;
-	pads_base = mmap(NULL, sysconf(_SC_PAGE_SIZE), PROT_READ | PROT_WRITE,
-				MAP_SHARED, dev_mem_fd, BCM2835_PADS_GPIO_0_27);
+	// static volatile uint32_t *pads_base;
+	// pads_base = mmap(NULL, sysconf(_SC_PAGE_SIZE), PROT_READ | PROT_WRITE,
+	// 			MAP_SHARED, dev_mem_fd, BCM2835_PADS_GPIO_0_27);
 
-	if (pads_base == MAP_FAILED) {
-		LOG_ERROR("mmap: %s", strerror(errno));
-		close(dev_mem_fd);
-		return ERROR_JTAG_INIT_FAILED;
-	}
+	// if (pads_base == MAP_FAILED) {
+	// 	LOG_ERROR("mmap: %s", strerror(errno));
+	// 	close(dev_mem_fd);
+	// 	return ERROR_JTAG_INIT_FAILED;
+	// }
 
-	/* set 4mA drive strength, slew rate limited, hysteresis on */
-	pads_base[BCM2835_PADS_GPIO_0_27_OFFSET] = 0x5a000008 + 1;
+	// /* set 4mA drive strength, slew rate limited, hysteresis on */
+	// pads_base[BCM2835_PADS_GPIO_0_27_OFFSET] = 0x5a000008 + 1;
 
 	/*
 	 * Configure TDO as an input, and TDI, TCK, TMS, TRST, SRST
 	 * as outputs.  Drive TDI and TCK low, and TMS/TRST/SRST high.
 	 */
 	if (transport_is_jtag()) {
-		tdo_gpio_mode = MODE_GPIO(tdo_gpio);
-		tdi_gpio_mode = MODE_GPIO(tdi_gpio);
-		tck_gpio_mode = MODE_GPIO(tck_gpio);
-		tms_gpio_mode = MODE_GPIO(tms_gpio);
+		// tdo_gpio_mode = MODE_GPIO(tdo_gpio);
+		// tdi_gpio_mode = MODE_GPIO(tdi_gpio);
+		// tck_gpio_mode = MODE_GPIO(tck_gpio);
+		// tms_gpio_mode = MODE_GPIO(tms_gpio);
 
-		INP_GPIO(tdo_gpio);
-
-		GPIO_CLR = 1<<tdi_gpio | 1<<tck_gpio;
-		GPIO_SET = 1<<tms_gpio;
-
-		OUT_GPIO(tdi_gpio);
-		OUT_GPIO(tck_gpio);
-		OUT_GPIO(tms_gpio);
-
-		if (trst_gpio != -1) {
-			trst_gpio_mode = MODE_GPIO(trst_gpio);
-			GPIO_SET = 1 << trst_gpio;
-			OUT_GPIO(trst_gpio);
-		}
+		bcm2835gpio_write(0, 1, 0);
+		gpio_set_tri(0, 0x7);
+		
+		gpio2_set_tri(0, 1);
+		bcm2835gpio_reset(0, 0);
 	}
 
-	if (transport_is_swd()) {
-		swclk_gpio_mode = MODE_GPIO(swclk_gpio);
-		swdio_gpio_mode = MODE_GPIO(swdio_gpio);
+	// if (transport_is_swd()) {
+	// 	swclk_gpio_mode = MODE_GPIO(swclk_gpio);
+	// 	swdio_gpio_mode = MODE_GPIO(swdio_gpio);
 
-		GPIO_CLR = 1<<swdio_gpio | 1<<swclk_gpio;
+	// 	GPIO_CLR = 1<<swdio_gpio | 1<<swclk_gpio;
 
-		OUT_GPIO(swclk_gpio);
-		OUT_GPIO(swdio_gpio);
-	}
+	// 	OUT_GPIO(swclk_gpio);
+	// 	OUT_GPIO(swdio_gpio);
+	// }
 
-	if (srst_gpio != -1) {
-		srst_gpio_mode = MODE_GPIO(srst_gpio);
-		GPIO_SET = 1 << srst_gpio;
-		OUT_GPIO(srst_gpio);
-	}
+	// if (srst_gpio != -1) {
+	// 	srst_gpio_mode = MODE_GPIO(srst_gpio);
+	// 	GPIO_SET = 1 << srst_gpio;
+	// 	OUT_GPIO(srst_gpio);
+	// }
 
-	if (swdio_dir_gpio != -1) {
-		swdio_dir_gpio_mode = MODE_GPIO(swdio_dir_gpio);
-		GPIO_SET = 1 << swdio_dir_gpio;
-		OUT_GPIO(swdio_dir_gpio);
-	}
+	// if (swdio_dir_gpio != -1) {
+	// 	swdio_dir_gpio_mode = MODE_GPIO(swdio_dir_gpio);
+	// 	GPIO_SET = 1 << swdio_dir_gpio;
+	// 	OUT_GPIO(swdio_dir_gpio);
+	// }
 
-	LOG_DEBUG("saved pinmux settings: tck %d tms %d tdi %d "
-		  "tdo %d trst %d srst %d", tck_gpio_mode, tms_gpio_mode,
-		  tdi_gpio_mode, tdo_gpio_mode, trst_gpio_mode, srst_gpio_mode);
+	// LOG_DEBUG("saved pinmux settings: tck %d tms %d tdi %d "
+	// 	  "tdo %d trst %d srst %d", tck_gpio_mode, tms_gpio_mode,
+	// 	  tdi_gpio_mode, tdo_gpio_mode, trst_gpio_mode, srst_gpio_mode);
 
 	return ERROR_OK;
 }
 
 static int bcm2835gpio_quit(void)
 {
-	if (transport_is_jtag()) {
-		SET_MODE_GPIO(tdo_gpio, tdo_gpio_mode);
-		SET_MODE_GPIO(tdi_gpio, tdi_gpio_mode);
-		SET_MODE_GPIO(tck_gpio, tck_gpio_mode);
-		SET_MODE_GPIO(tms_gpio, tms_gpio_mode);
-		if (trst_gpio != -1)
-			SET_MODE_GPIO(trst_gpio, trst_gpio_mode);
-	}
-
-	if (transport_is_swd()) {
-		SET_MODE_GPIO(swclk_gpio, swclk_gpio_mode);
-		SET_MODE_GPIO(swdio_gpio, swdio_gpio_mode);
-	}
-
-	if (srst_gpio != -1)
-		SET_MODE_GPIO(srst_gpio, srst_gpio_mode);
-
-	if (swdio_dir_gpio != -1)
-		SET_MODE_GPIO(swdio_dir_gpio, swdio_dir_gpio_mode);
-
 	return ERROR_OK;
 }
